@@ -43,9 +43,21 @@ if __name__ == "__main__":
     bpy.context.preferences.addons['cycles'].preferences.compute_device_type = 'CUDA'
     bpy.context.preferences.addons["cycles"].preferences.get_devices()
     print(bpy.context.preferences.addons["cycles"].preferences.compute_device_type)
-    for d in bpy.context.preferences.addons["cycles"].preferences.devices:
-        d["use"] = 1 # Using all devices, include GPU and CPU
-        print(d["name"], d["use"])
+    # 遍历所有设备，启用名称包含 "GPU 2" 的设备
+    devices = bpy.context.preferences.addons['cycles'].preferences.devices
+    if devices:
+        for i, device in enumerate(devices):
+            # 仅启用索引为 3 的设备
+            if device.type == 'CUDA' and i == 2:  
+                device.use = True
+            else:
+                device.use = False
+    else:
+        print("No devices found. Please check GPU availability.")
+    bpy.context.scene.cycles.device = 'GPU'
+    # for d in bpy.context.preferences.addons["cycles"].preferences.devices:
+    #     d["use"] = 1 # Using all devices, include GPU and CPU
+    #     print(d["name"], d["use"])
 
     scene_name = args.scene.split("/")[-1].replace("_scene.blend", "")
     print("scene name:{0}".format(scene_name))

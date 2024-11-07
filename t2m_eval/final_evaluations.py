@@ -281,18 +281,18 @@ if __name__ == '__main__':
     # dataset_opt_path = './checkpoints/kit/Comp_v6_KLD005/opt.txt'
     # dataset_opt_path = './checkpoints/t2m/Comp_v6_KLD01/opt.txt'
     eval_motion_loaders = {
-        'CHOIS w classifier guidance': lambda: get_motion_loader_for_chois_eval(
-            '/move/u/jiamanli/eccv24_chois/res_npz_files_rebuttal/chois_perturb_mean',
-            batch_size,
-        ), 
+        # 'CHOIS w classifier guidance': lambda: get_motion_loader_for_chois_eval(
+        #     '/move/u/jiamanli/eccv24_chois/res_npz_files_rebuttal/chois_perturb_mean',
+        #     batch_size,
+        # ), 
 
-        'CHOIS w recon x0': lambda: get_motion_loader_for_chois_eval(
-            '/move/u/jiamanli/eccv24_chois/res_npz_files_rebuttal/chois_recon_guide_w_x0',
-            batch_size,
-        ), 
+        # 'CHOIS w recon x0': lambda: get_motion_loader_for_chois_eval(
+        #     '/move/u/jiamanli/eccv24_chois/res_npz_files_rebuttal/chois_recon_guide_w_x0',
+        #     batch_size,
+        # ), 
 
         'CHOIS': lambda: get_motion_loader_for_chois_eval(
-            '/move/u/jiamanli/eccv24_chois/res_npz_files/chois',
+            "/home/guoling/HOIs/chois_release/chois_single_window_results/res_npz_files/chois",
             batch_size,
         ), 
 

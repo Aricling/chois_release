@@ -299,7 +299,7 @@ class ObjectCondGaussianDiffusion(nn.Module):
                     n_dec_layers=n_dec_layers, max_timesteps=max_timesteps) 
         # Input condition and noisy motion, noise level t, predict gt motion
         
-        self.objective = objective
+        self.objective = objective  # pred_x0
 
         self.seq_len = max_timesteps - 1 
         self.out_dim = out_dim 
@@ -317,7 +317,7 @@ class ObjectCondGaussianDiffusion(nn.Module):
 
         timesteps, = betas.shape
         self.num_timesteps = int(timesteps)
-        self.loss_type = loss_type
+        self.loss_type = loss_type  # l1
 
         # helper function to register buffer from float64 to float32
 
@@ -672,7 +672,7 @@ class ObjectCondGaussianDiffusion(nn.Module):
                     rotate_at_frame_w_obj(global_human_jpos.data.cpu().numpy(), global_human_q.data.cpu().numpy(), \
                     obj_com_pos.data.cpu().numpy(), obj_q.data.cpu().numpy(), \
                     trans2joint.data.cpu().numpy(), ds.parents, n_past=1, floor_z=True, use_global_human=True)
-                    # 1 X T X J X 3, 1 X T X J X 4, 1 X T X 3, 1 X T X 4 
+                    # 1 X T X J X 3, 1 X T X J X 4, 1 X T X 3, 1 X T X 4 (T still = 10)
                 else:
                     # This code is used for not inputting first human pose. 
                     new_glob_jpos, new_glob_q, new_obj_com_pos, new_obj_q = rotate_at_frame_w_obj_global( \
@@ -1220,7 +1220,7 @@ class ObjectCondGaussianDiffusion(nn.Module):
 
         if self.objective == 'pred_noise':
             target = noise
-        elif self.objective == 'pred_x0':
+        elif self.objective == 'pred_x0':   # This is us
             target = x_start
         else:
             raise ValueError(f'unknown objective {self.objective}')

@@ -38,6 +38,8 @@ from evaluation_metrics import compute_metrics, determine_floor_height_and_conta
 
 import clip 
 
+from tqdm import tqdm
+
 import random
 torch.manual_seed(1)
 random.seed(1)
@@ -184,18 +186,20 @@ class Trainer(object):
         ema_update_every=10,
         save_and_sample_every=40000,
         results_folder='./results',
-        use_wandb=True,   
+        use_wandb=True,  
+        use_device='cuda' 
     ):
         super().__init__()
 
+        self.device=use_device
         self.use_wandb = use_wandb           
         if self.use_wandb:
             # Loggers
-            wandb.init(config=opt, project=opt.wandb_pj_name, entity=opt.entity, \
+            wandb.init(config=opt, project=opt.wandb_pj_name, \
             name=opt.exp_name, dir=opt.save_dir)
 
         self.model = diffusion_model
-        self.ema = EMA(diffusion_model, beta=ema_decay, update_every=ema_update_every)
+        self.ema = EMA(diffusion_model, beta=ema_decay, update_every=ema_update_every)  # beta表示权重对过去的依赖比例，update_every表示EMA更新的频率
 
         self.step_start_ema = step_start_ema
         self.save_and_sample_every = save_and_sample_every
@@ -206,10 +210,18 @@ class Trainer(object):
 
         self.optimizer = Adam(diffusion_model.parameters(), lr=train_lr)
 
-        self.step = 0
-
         self.amp = amp
         self.scaler = GradScaler(enabled=amp)
+        if opt.pretrained_model:
+            data=torch.load(opt.pretrained_model, map_location=self.device)
+            print('Loaded pretrained model from:', opt.pretrained_model)
+            self.model.load_state_dict(data['model'], strict=False)
+            self.ema.load_state_dict(data['ema'], strict=False)
+            self.step = data['step']
+            self.scaler.load_state_dict(data['scaler'])
+        else:
+            self.step = 0
+            
 
         self.results_folder = results_folder
 
@@ -239,11 +251,11 @@ class Trainer(object):
 
         self.test_on_train = self.opt.test_on_train 
 
-        self.input_first_human_pose = self.opt.input_first_human_pose 
+        self.input_first_human_pose = self.opt.input_first_human_pose # infer true, train unknown
 
-        self.use_guidance_in_denoising = self.opt.use_guidance_in_denoising 
+        self.use_guidance_in_denoising = self.opt.use_guidance_in_denoising # infer true
 
-        self.compute_metrics = self.opt.compute_metrics 
+        self.compute_metrics = self.opt.compute_metrics     # 默认是false
 
         self.loss_w_feet = self.opt.loss_w_feet 
         self.loss_w_fk = self.opt.loss_w_fk 
@@ -305,9 +317,9 @@ class Trainer(object):
         sdf_centroid = np.asarray(sdf_json_data['centroid']) # a list with 3 items -> 3 
         sdf_extents = np.asarray(sdf_json_data['extents']) # a list with 3 items -> 3 
 
-        sdf = torch.from_numpy(sdf).float()[None].cuda()
-        sdf_centroid = torch.from_numpy(sdf_centroid).float()[None].cuda()
-        sdf_extents = torch.from_numpy(sdf_extents).float()[None].cuda() 
+        sdf = torch.from_numpy(sdf).float()[None].to(self.device)
+        sdf_centroid = torch.from_numpy(sdf_centroid).float()[None].to(self.device)
+        sdf_extents = torch.from_numpy(sdf_extents).float()[None].to(self.device) 
 
         return sdf, sdf_centroid, sdf_extents
 
@@ -327,14 +339,14 @@ class Trainer(object):
         sdf_centroid = np.asarray(sdf_json_data['centroid']) # a list with 3 items -> 3 
         sdf_extents = np.asarray(sdf_json_data['extents']) # a list with 3 items -> 3 
 
-        sdf = torch.from_numpy(sdf).float()[None].cuda()
-        sdf_centroid = torch.from_numpy(sdf_centroid).float()[None].cuda()
-        sdf_extents = torch.from_numpy(sdf_extents).float()[None].cuda() 
+        sdf = torch.from_numpy(sdf).float()[None].to(self.device)
+        sdf_centroid = torch.from_numpy(sdf_centroid).float()[None].to(self.device)
+        sdf_extents = torch.from_numpy(sdf_extents).float()[None].to(self.device) 
 
         return sdf, sdf_centroid, sdf_extents
 
     def load_and_freeze_clip(self, clip_version):
-        clip_model, clip_preprocess = clip.load(clip_version, device='cuda',
+        clip_model, clip_preprocess = clip.load(clip_version, device=self.device,
                                 jit=False) 
         # Freeze CLIP weights
         clip_model.eval()
@@ -351,13 +363,13 @@ class Trainer(object):
             default_context_length = 77
             context_length = max_text_len + 2 # start_token + 20 + end_token
             assert context_length < default_context_length
-            texts = clip.tokenize(raw_text, context_length=context_length, truncate=True).to(device) # [bs, context_length] # if n_tokens > context_length -> will truncate
+            texts = clip.tokenize(raw_text, context_length=context_length, truncate=True).to(self.device) # [bs, context_length] # if n_tokens > context_length -> will truncate
             # print('texts', texts.shape)
             zero_pad = torch.zeros([texts.shape[0], default_context_length-context_length], dtype=texts.dtype, device=texts.device)
             texts = torch.cat([texts, zero_pad], dim=1)
             # print('texts after pad', texts.shape, texts)
         else:
-            texts = clip.tokenize(raw_text, truncate=True).to(device) # [bs, context_length] # if n_tokens > 77 -> will truncate
+            texts = clip.tokenize(raw_text, truncate=True).to(self.device) # [bs, context_length] # if n_tokens > 77 -> will truncate
         
         return self.clip_model.encode_text(texts).float().detach() # BS X 512 
 
@@ -367,19 +379,21 @@ class Trainer(object):
             window=window_size, use_object_splits=self.use_object_split, \
             input_language_condition=self.add_language_condition, \
             use_random_frame_bps=self.use_random_frame_bps, \
-            use_object_keypoints=self.use_object_keypoints)
+            use_object_keypoints=self.use_object_keypoints, \
+            device=self.device)
         val_dataset = CanoObjectTrajDataset(train=False, data_root_folder=self.data_root_folder, \
             window=window_size, use_object_splits=self.use_object_split, \
             input_language_condition=self.add_language_condition, \
             use_random_frame_bps=self.use_random_frame_bps, \
-            use_object_keypoints=self.use_object_keypoints)
+            use_object_keypoints=self.use_object_keypoints, \
+            device=self.device)
 
         self.ds = train_dataset 
         self.val_ds = val_dataset
         self.dl = cycle(data.DataLoader(self.ds, batch_size=self.batch_size, \
-            shuffle=True, pin_memory=True, num_workers=4))
+            shuffle=True, pin_memory=True, num_workers=0))
         self.val_dl = cycle(data.DataLoader(self.val_ds, batch_size=self.batch_size, \
-            shuffle=False, pin_memory=True, num_workers=4))
+            shuffle=False, pin_memory=True, num_workers=0))
 
     def save(self, milestone):
         data = {
@@ -392,9 +406,9 @@ class Trainer(object):
 
     def load(self, milestone, pretrained_path=None):
         if pretrained_path is None:
-            data = torch.load(os.path.join(self.results_folder, 'model-'+str(milestone)+'.pt'))
+            data = torch.load(os.path.join(self.results_folder, 'model-'+str(milestone)+'.pt'), map_location=self.device)
         else:
-            data = torch.load(pretrained_path)
+            data = torch.load(pretrained_path, map_location=self.device)
 
         self.step = data['step']
         self.model.load_state_dict(data['model'], strict=False)
@@ -405,7 +419,7 @@ class Trainer(object):
         # data: BS X T X D (3+9)
         # actual_seq_len: BS 
         tmp_mask = torch.arange(self.window).expand(data.shape[0], \
-                self.window) == (actual_seq_len[:, None].repeat(1, self.window)-1)
+                self.window) == (actual_seq_len[:, None].repeat(1, self.window)-1)  # 只有最后一维为True
                 # BS X max_timesteps
         tmp_mask = tmp_mask.to(data.device)[:, :, None] # BS X T X 1
 
@@ -459,19 +473,20 @@ class Trainer(object):
 
     def train(self):
         init_step = self.step 
-        for idx in range(init_step, self.train_num_steps):
+        print("start step:", init_step)
+        for idx in tqdm(range(init_step, self.train_num_steps), total=self.train_num_steps, desc="steps"):
             self.optimizer.zero_grad()
         
             nan_exists = False # If met nan in loss or gradient, need to skip to next data. 
             for i in range(self.gradient_accumulate_every):
                 data_dict = next(self.dl)
                 
-                human_data = data_dict['motion'].cuda() # BS X T X (24*3 + 22*6)
-                obj_data = data_dict['obj_motion'].cuda() # BS X T X (3+9) 
+                human_data = data_dict['motion'].to(self.device) # BS X T X (24*3 + 22*6)
+                obj_data = data_dict['obj_motion'].to(self.device) # BS X T X (3+9) 
 
-                obj_bps_data = data_dict['input_obj_bps'].cuda().reshape(-1, 1, 1024*3) # BS X 1 X 1024 X 3 -> BS X 1 X (1024*3) 
+                obj_bps_data = data_dict['input_obj_bps'].to(self.device).reshape(-1, 1, 1024*3) # BS X 1 X 1024 X 3 -> BS X 1 X (1024*3) 
                 
-                rest_human_offsets = data_dict['rest_human_offsets'].cuda() # BS X 24 X 3 
+                rest_human_offsets = data_dict['rest_human_offsets'].to(self.device) # BS X 24 X 3 
 
                 ori_data_cond = obj_bps_data # BS X 1 X (1024*3) 
 
@@ -496,7 +511,7 @@ class Trainer(object):
                 cond_mask = torch.cat((cond_mask, human_cond_mask), dim=-1) # BS X T X (3+6+24*3+22*6)
 
                 with autocast(enabled = self.amp):    
-                    contact_data = data_dict['contact_labels'].cuda() # BS X T X 4 
+                    contact_data = data_dict['contact_labels'].to(self.device) # BS X T X 4 
                    
                     data = torch.cat((obj_data, human_data, contact_data), dim=-1) 
                     cond_mask = torch.cat((cond_mask, \
@@ -538,35 +553,35 @@ class Trainer(object):
                         torch.cuda.empty_cache()
                         continue
 
-                    if self.use_wandb:
-                        if self.use_object_keypoints:
-                            log_dict = {
-                                "Train/Loss/Total Loss": loss.item(),
-                                "Train/Loss/Diffusion Loss": loss_diffusion.item(),
-                                "Train/Loss/Object Loss": loss_obj.item(),
-                                "Train/Loss/Human Loss": loss_human.item(),
-                                "Train/Loss/Semantic Contact Loss": loss_feet.item(),
-                                "Train/Loss/FK Loss": loss_fk.item(),
-                                "Train/Loss/Object Pts Loss": loss_obj_pts.item(),
-                            }
-                        else:
-                            log_dict = {
-                                "Train/Loss/Total Loss": loss.item(),
-                                "Train/Loss/Diffusion Loss": loss_diffusion.item(),
-                                "Train/Loss/Object Loss": loss_obj.item(),
-                                "Train/Loss/Human Loss": loss_human.item(),
-                            }
-                        wandb.log(log_dict)
+            if self.use_wandb:
+                if self.use_object_keypoints:
+                    log_dict = {
+                        "Train/Loss/Total Loss": loss.item(),
+                        "Train/Loss/Diffusion Loss": loss_diffusion.item(),
+                        "Train/Loss/Object Loss": loss_obj.item(),
+                        "Train/Loss/Human Loss": loss_human.item(),
+                        "Train/Loss/Semantic Contact Loss": loss_feet.item(),
+                        "Train/Loss/FK Loss": loss_fk.item(),
+                        "Train/Loss/Object Pts Loss": loss_obj_pts.item(),
+                    }
+                else:
+                    log_dict = {
+                        "Train/Loss/Total Loss": loss.item(),
+                        "Train/Loss/Diffusion Loss": loss_diffusion.item(),
+                        "Train/Loss/Object Loss": loss_obj.item(),
+                        "Train/Loss/Human Loss": loss_human.item(),
+                    }
+                wandb.log(log_dict, step=self.step)
 
-                    if idx % 20 == 0 and i == 0:
-                        print("Step: {0}".format(idx))
-                        print("Loss: %.4f" % (loss.item()))
-                        print("Object Loss: %.4f" % (loss_obj.item()))
-                        print("Human Loss: %.4f" % (loss_human.item()))
-                        if self.use_object_keypoints:
-                            print("Semantic Contact Loss: %.4f" % (loss_feet.item())) 
-                            print("FK Loss: %.4f" % (loss_fk.item())) 
-                            print("Object Pts Loss: %.4f" % (loss_obj_pts.item())) 
+                if idx % 20 == 0 and i == 0:
+                    print("Step: {0}".format(idx))
+                    print("Loss: %.4f" % (loss.item()))
+                    print("Object Loss: %.4f" % (loss_obj.item()))
+                    print("Human Loss: %.4f" % (loss_human.item()))
+                    if self.use_object_keypoints:
+                        print("Semantic Contact Loss: %.4f" % (loss_feet.item())) 
+                        print("FK Loss: %.4f" % (loss_fk.item())) 
+                        print("Object Pts Loss: %.4f" % (loss_obj_pts.item())) 
 
             if nan_exists:
                 continue
@@ -581,14 +596,14 @@ class Trainer(object):
 
                 with torch.no_grad():
                     val_data_dict = next(self.val_dl)
-                    val_human_data = val_data_dict['motion'].cuda() 
-                    val_obj_data = val_data_dict['obj_motion'].cuda()
+                    val_human_data = val_data_dict['motion'].to(self.device) 
+                    val_obj_data = val_data_dict['obj_motion'].to(self.device)
 
-                    obj_bps_data = val_data_dict['input_obj_bps'].cuda().reshape(-1, 1, 1024*3)
+                    obj_bps_data = val_data_dict['input_obj_bps'].to(self.device).reshape(-1, 1, 1024*3)
                    
                     ori_data_cond = obj_bps_data 
 
-                    rest_human_offsets = val_data_dict['rest_human_offsets'].cuda() # BS X 24 X 3 
+                    rest_human_offsets = val_data_dict['rest_human_offsets'].to(self.device) # BS X 24 X 3 
 
                     # Generate padding mask 
                     actual_seq_len = val_data_dict['seq_len'] + 1 # BS, + 1 since we need additional timestep for noise level 
@@ -607,7 +622,7 @@ class Trainer(object):
                     cond_mask = torch.cat((cond_mask, human_cond_mask), dim=-1) # BS X T X (3+6+24*3+22*6)
 
                     # Get validation loss 
-                    contact_data = val_data_dict['contact_labels'].cuda() # BS X T X 4 
+                    contact_data = val_data_dict['contact_labels'].to(device) # BS X T X 4 
                     
                     data = torch.cat((val_obj_data, val_human_data, contact_data), dim=-1) 
                     cond_mask = torch.cat((cond_mask, \
@@ -1059,7 +1074,7 @@ class Trainer(object):
             else:
                 test_loader = torch.utils.data.DataLoader(
                     self.val_ds, batch_size=1, shuffle=False,
-                    num_workers=1, pin_memory=True, drop_last=False) 
+                    num_workers=0, pin_memory=True, drop_last=False) 
 
         self.prep_evaluation_metrics_list()
 
@@ -1073,23 +1088,23 @@ class Trainer(object):
             start_frame_idx_list = val_data_dict['s_idx']
             end_frame_idx_list = val_data_dict['e_idx'] 
 
-            val_human_data = val_data_dict['motion'].cuda() 
-            val_obj_data = val_data_dict['obj_motion'].cuda()
+            val_human_data = val_data_dict['motion'].to(self.device)    # [bs, T, 204]
+            val_obj_data = val_data_dict['obj_motion'].to(self.device)  # [bs, T, 12]
 
-            obj_bps_data = val_data_dict['input_obj_bps'].cuda().reshape(-1, 1, 1024*3)
+            obj_bps_data = val_data_dict['input_obj_bps'].to(self.device).reshape(-1, 1, 1024*3)
             ori_data_cond = obj_bps_data # BS X 1 X (1024*3) 
 
-            rest_human_offsets = val_data_dict['rest_human_offsets'].cuda() # BS X 24 X 3 
+            rest_human_offsets = val_data_dict['rest_human_offsets'].to(self.device) # BS X 24 X 3 
             
             if "contact_labels" in val_data_dict:
-                contact_labels = val_data_dict['contact_labels'].cuda() # BS X T X 4 
+                contact_labels = val_data_dict['contact_labels'].to(self.device) # BS X T X 4 
             else:
                 contact_labels = None 
 
             # Generate padding mask 
             actual_seq_len = val_data_dict['seq_len'] + 1 # BS, + 1 since we need additional timestep for noise level 
             tmp_mask = torch.arange(self.window+1).expand(val_obj_data.shape[0], \
-            self.window+1) < actual_seq_len[:, None].repeat(1, self.window+1)
+            self.window+1) < actual_seq_len[:, None].repeat(1, self.window+1)   # 在inference的时候应该是121个True
             # BS X max_timesteps
             padding_mask = tmp_mask[:, None, :].to(val_obj_data.device)
 
@@ -1106,7 +1121,7 @@ class Trainer(object):
             if self.use_guidance_in_denoising:
                 # Load current sequence's object SDF
                 self.object_sdf, self.object_sdf_centroid, self.object_sdf_extents = \
-                self.load_object_sdf_data(val_data_dict['obj_name'][0])
+                self.load_object_sdf_data(val_data_dict['obj_name'][0]) # [1,256,256,256],[1,3]
 
                 guidance_fn = self.apply_different_guidance_loss 
             else:
@@ -1121,10 +1136,10 @@ class Trainer(object):
             val_human_data = val_human_data.repeat(num_samples_per_seq, 1, 1) 
             cond_mask = cond_mask.repeat(num_samples_per_seq, 1, 1) 
             padding_mask = padding_mask.repeat(num_samples_per_seq, 1, 1) # BS X 1 X 121 
-            ori_data_cond = ori_data_cond.repeat(num_samples_per_seq, 1, 1)  
+            ori_data_cond = ori_data_cond.repeat(num_samples_per_seq, 1, 1)  # obj bps [bs,1,1024*3]
             rest_human_offsets = rest_human_offsets.repeat(num_samples_per_seq, 1, 1)
            
-            contact_data = torch.zeros(val_obj_data.shape[0], val_obj_data.shape[1], 4).to(val_obj_data.device) 
+            contact_data = torch.zeros(val_obj_data.shape[0], val_obj_data.shape[1], 4).to(val_obj_data.device)     # (1,120,4)
             data = torch.cat((val_obj_data, val_human_data, contact_data), dim=-1) 
             cond_mask = torch.cat((cond_mask, \
                     torch.ones_like(contact_data).to(cond_mask.device)), dim=-1) 
@@ -1147,7 +1162,7 @@ class Trainer(object):
 
             for_vis_gt_data = torch.cat((val_obj_data, val_human_data), dim=-1)
 
-            sample_idx = 0
+            sample_idx = 0  # 这个参数也不知道是要干什么
             vis_tag = str(milestone)+"_sidx_"+str(s_idx)+"_sample_cnt_"+str(sample_idx)
 
             if self.use_guidance_in_denoising:
@@ -1823,19 +1838,19 @@ class Trainer(object):
           
             # Get human verts 
             mesh_jnts, mesh_verts, mesh_faces = \
-                run_smplx_model(root_trans[None].cuda(), curr_local_rot_aa_rep[None].cuda(), \
-                betas.cuda(), [gender], ds.bm_dict, return_joints24=True)
+                run_smplx_model(root_trans[None].to(self.device), curr_local_rot_aa_rep[None].to(self.device), \
+                betas.to(self.device), [gender], ds.bm_dict, return_joints24=True)
 
             # For generating all the vertices of the object 
             obj_rest_verts, obj_mesh_faces = ds.load_rest_pose_object_geometry(object_name) 
             obj_rest_verts = torch.from_numpy(obj_rest_verts).float().to(pred_seq_com_pos.device)
 
-            obj_mesh_verts = ds.load_object_geometry_w_rest_geo(curr_obj_rot_mat.cuda(), \
+            obj_mesh_verts = ds.load_object_geometry_w_rest_geo(curr_obj_rot_mat.to(self.device), \
                         pred_seq_com_pos[idx], obj_rest_verts) # T X Nv X 3 
 
             # For generating object keypoints 
             # num_steps = pred_seq_com_pos[idx].shape[0]
-            # rest_pose_obj_kpts = data_dict['rest_pose_obj_pts'].cuda()[0] # K X 3 
+            # rest_pose_obj_kpts = data_dict['rest_pose_obj_pts'].to(device)[0] # K X 3 
             # pred_seq_obj_kpts = torch.matmul(curr_obj_rot_mat[:, None, :, :].repeat(1, \
             #         rest_pose_obj_kpts.shape[0], 1, 1), \
             #         rest_pose_obj_kpts[None, :, :, None].repeat(num_steps, 1, 1, 1)) + \
@@ -2240,12 +2255,12 @@ class Trainer(object):
                 # Use distance heuristics to determine the waypoints at frame 30, 60, 90. 
                 cano_quat, planned_obj_path, planned_scene_names = \
                         self.load_planned_path_as_waypoints_new(planned_paths_list[p_idx], \
-                        use_canonicalization=True, return_scene_names=True) 
+                        use_canonicalization=True, return_scene_names=True)     # 这里看着主要就是规范化方向
 
                 # planned_obj_path: K X 3
                 # To convert the planned path back to the original one, need to apply inverse(cano_quat). 
 
-                rest_human_offsets = val_data_dict['rest_human_offsets'].cuda() # BS X 24 X 3 
+                rest_human_offsets = val_data_dict['rest_human_offsets'].to(self.device) # BS X 24 X 3 
 
                 # planned_path_floor_height = planned_obj_path[0, -1] # In visualization, put the interaction from floor z = 0 to this value. 
                 planned_path_floor_height = scene_floor_h_dict[self.test_scene_name] 
@@ -2260,9 +2275,9 @@ class Trainer(object):
                 waypoints2start_trans = planned_obj_path[1:, :] - planned_obj_path[0:1, :] # (K-1) X 3 
                 end2start_trans = planned_obj_path[-1:, :] - planned_obj_path[0:1, :] # 1 X 3 
 
-                val_human_data = val_data_dict['motion'].cuda() 
-                val_normalized_obj_data = val_data_dict['obj_motion'].cuda() # Only need the first frame. 
-                val_ori_obj_data = val_data_dict['ori_obj_motion'].cuda() # BS X T X (3+9)
+                val_human_data = val_data_dict['motion'].to(self.device) 
+                val_normalized_obj_data = val_data_dict['obj_motion'].to(self.device) # Only need the first frame. 
+                val_ori_obj_data = val_data_dict['ori_obj_motion'].to(self.device) # BS X T X (3+9)
 
                 start_obj_com_pos = val_ori_obj_data[:, 0:1, :3] # BS X 1 X 3 
                 move2aligned_planned_path = start_obj_pos_on_planned_path[None].to(start_obj_com_pos.device) - \
@@ -2272,12 +2287,12 @@ class Trainer(object):
                 self.move_to_planned_path_in_scene = move2aligned_planned_path.clone() 
                 self.cano_quat_in_scene = cano_quat.clone()  
 
-                end_obj_com_pos = start_obj_com_pos + end2start_trans[None, :, :].cuda() # BS X 1 X 3
+                end_obj_com_pos = start_obj_com_pos + end2start_trans[None, :, :].to(self.device) # BS X 1 X 3
 
-                seq_obj_com_pos = torch.zeros(start_obj_com_pos.shape[0], (planned_obj_path.shape[0]-1)*30, 3).cuda() 
+                seq_obj_com_pos = torch.zeros(start_obj_com_pos.shape[0], (planned_obj_path.shape[0]-1)*30, 3).to(self.device) 
                 seq_obj_com_pos[:, 0:1, :] = start_obj_com_pos.clone() 
                 
-                waypoints_com_pos = start_obj_com_pos + waypoints2start_trans[None, :, :].cuda() # BS X (K-1) X 3
+                waypoints_com_pos = start_obj_com_pos + waypoints2start_trans[None, :, :].to(self.device) # BS X (K-1) X 3
 
                 waypoints_com_pos_for_vis = waypoints_com_pos.clone()
 
@@ -2326,7 +2341,7 @@ class Trainer(object):
                 # Reaplce the first frame's object rotation. 
                 val_obj_data[:, 0:1, 3:] = val_normalized_obj_data[:, 0:1, 3:] 
 
-                obj_bps_data = val_data_dict['input_obj_bps'].cuda().reshape(-1, 1, 1024*3)
+                obj_bps_data = val_data_dict['input_obj_bps'].to(self.device).reshape(-1, 1, 1024*3)
              
                 ori_data_cond = obj_bps_data 
 
@@ -2340,7 +2355,7 @@ class Trainer(object):
                 tmp_mask = torch.arange(self.window+1).expand(val_human_data.shape[0], \
                         self.window+1) < actual_seq_len
                         # BS X max_timesteps
-                padding_mask = tmp_mask[:, None, :].cuda() # 1 X 1 X 121 
+                padding_mask = tmp_mask[:, None, :].to(self.device) # 1 X 1 X 121 
 
                 # padding_mask = None 
 
@@ -2627,8 +2642,8 @@ class Trainer(object):
           
             # Get human verts 
             mesh_jnts, mesh_verts, mesh_faces = \
-                run_smplx_model(root_trans[None].cuda(), curr_local_rot_aa_rep[None].cuda(), \
-                betas.cuda(), [gender], self.ds.bm_dict, return_joints24=True)
+                run_smplx_model(root_trans[None].to(self.device), curr_local_rot_aa_rep[None].to(self.device), \
+                betas.to(self.device), [gender], self.ds.bm_dict, return_joints24=True)
 
             if self.test_unseen_objects:
                 # Get object verts 
@@ -2755,7 +2770,7 @@ class Trainer(object):
                 for t_idx in range(curr_timesteps):
                     if curr_cond_mask[t_idx] == 0 and t_idx != 0:
                         selected_waypoint = data_dict['ori_obj_motion'][idx, t_idx:t_idx+1, :3]
-                        selected_waypoint[:, 2] = 0.05
+                        selected_waypoint[:, 2] = 0.05  # 这为什么还直接指定上值了，给z轴的值定了一个固定值
                         waypoints_list.append(selected_waypoint)
 
                 ball_for_vis_data = torch.cat(waypoints_list, dim=0) # K X 3 
@@ -2825,9 +2840,10 @@ class Trainer(object):
 
                     if vis_gt: 
                         if not save_obj_only:
-                            run_blender_rendering_and_save2video(mesh_save_folder, out_rendered_img_folder, dest_out_vid_path, \
-                                    condition_folder=ball_mesh_save_folder, vis_object=True, vis_condition=True, \
-                                    scene_blend_path=floor_blend_path)
+                            if not os.path.exists(dest_out_vid_path):
+                                run_blender_rendering_and_save2video(mesh_save_folder, out_rendered_img_folder, dest_out_vid_path, \
+                                        condition_folder=ball_mesh_save_folder, vis_object=True, vis_condition=True, \
+                                        scene_blend_path=floor_blend_path)
                     
 
             if idx > 1:
@@ -2908,8 +2924,8 @@ class Trainer(object):
           
             # Get human verts 
             mesh_jnts, mesh_verts, mesh_faces = \
-                run_smplx_model(root_trans[None].cuda(), curr_local_rot_aa_rep[None].cuda(), \
-                betas.cuda(), [gender], self.ds.bm_dict, return_joints24=True)
+                run_smplx_model(root_trans[None].to(self.device), curr_local_rot_aa_rep[None].to(self.device), \
+                betas.to(self.device), [gender], self.ds.bm_dict, return_joints24=True)
 
             # Get object verts 
             obj_rest_verts, obj_mesh_faces = self.ds.load_rest_pose_object_geometry(object_name)
@@ -3067,6 +3083,7 @@ def run_train(opt, device):
     torch.cuda.empty_cache()
 
 def run_sample(opt, device):
+
     # Prepare Directories
     save_dir = Path(opt.save_dir)
     wdir = save_dir / 'weights'
@@ -3100,7 +3117,8 @@ def run_sample(opt, device):
         ema_decay=0.995,                # exponential moving average decay
         amp=True,                        # turn on mixed precision
         results_folder=str(wdir),
-        use_wandb=False 
+        use_wandb=False,
+        use_device=device
     )
    
     if opt.use_long_planned_path:
@@ -3114,7 +3132,7 @@ def parse_opt():
     parser = argparse.ArgumentParser()
     parser.add_argument('--project', default='runs/train', help='project/name')
     parser.add_argument('--wandb_pj_name', type=str, default='chois_projects', help='project name')
-    parser.add_argument('--entity', default='', help='W&B entity')
+    parser.add_argument('--entity', default='aricling', help='W&B entity')
     parser.add_argument('--exp_name', default='chois', help='save to project/name')
 
     parser.add_argument('--device', default='0', help='cuda device')

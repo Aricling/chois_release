@@ -398,7 +398,7 @@ def compute_metrics(ori_verts_gt, ori_verts_pred, ori_jpos_gt, ori_jpos_pred, hu
     rhand_jpe = np.linalg.norm(rhand_jpos_pred - rhand_jpos_gt, axis=1).mean() * 1000
     hand_jpe = (lhand_jpe+rhand_jpe)/2.0 
 
-    # Calculate MPVPE  
+    # Calculate MPVPE  ##  平均顶点误差
     verts_pred = ori_verts_pred - ori_jpos_pred[:, 0:1]
     verts_gt = ori_verts_gt - ori_jpos_gt[:, 0:1]
     verts_pred = verts_pred.detach().cpu().numpy()

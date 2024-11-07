@@ -149,7 +149,7 @@ class Decoder(nn.Module):
             n_layers, n_head, d_k, d_v, max_timesteps, use_full_attention=False):
         super(Decoder, self).__init__()
 
-        self.start_conv = nn.Conv1d(d_feats, d_model, 1) # (input: 17*3)
+        self.start_conv = nn.Conv1d(d_feats, d_model, 1) # (input: 17*3) 这里就是处理人体和物体的inital state的地方
         self.position_vec = nn.Embedding.from_pretrained(
             get_sinusoid_encoding_table(max_timesteps+1, d_model, padding_idx=0),
             freeze=True)

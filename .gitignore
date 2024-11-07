@@ -24,3 +24,12 @@ core
 *.mkv
 *.rrd
 *.nfs*
+t2m_eval/checkpoints-20241105T135551Z-001.zip
+t2m_eval/checkpoints/omomo/motion_ae/model/latest.tar
+t2m_eval/checkpoints/omomo/text_motion_features/model/finest.tar
+t2m_eval/checkpoints/omomo/motion_ae_layer_4/model/latest.tar
+t2m_eval/checkpoints/omomo/text_motion_features/model/latest.tar
+chois_release_exp_output/chois_window_120_set1/*
+data/processed_data
+human_body_prior
+data/smpl_all_models

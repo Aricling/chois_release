@@ -21,7 +21,7 @@ from human_body_prior.body_model.body_model import BodyModel
 
 from manip.lafan1.utils import rotate_at_frame_w_obj 
 
-SMPLH_PATH = "/viscam/u/jiamanli/github/hm_interaction/smpl_all_models/smplh_amass"
+SMPLH_PATH = "/home/guoling/HOIs/all_body_models/smplh_amass"
 
 def to_tensor(array, dtype=torch.float32):
     if not torch.is_tensor(array):
@@ -126,21 +126,24 @@ class CanoObjectTrajDataset(Dataset):
         input_language_condition=False,
         use_random_frame_bps=False, 
         use_object_keypoints=False, 
+        device=None
     ):
-        self.train = train
-        
-        self.window = window 
+        self.device=device
 
-        self.use_object_splits = use_object_splits 
+        self.train = train  # True
+        
+        self.window = window    # 120
+
+        self.use_object_splits = use_object_splits  # False
         self.train_objects = ["largetable", "woodchair", "plasticbox", "largebox", "smallbox", "trashcan", "monitor", \
                     "floorlamp", "clothesstand"] 
         self.test_objects = ["smalltable", "whitechair", "suitcase", "tripod"]
 
-        self.input_language_condition = input_language_condition 
+        self.input_language_condition = input_language_condition    # True
 
-        self.use_random_frame_bps = use_random_frame_bps 
+        self.use_random_frame_bps = use_random_frame_bps    # True
 
-        self.use_object_keypoints = use_object_keypoints 
+        self.use_object_keypoints = use_object_keypoints    # True
 
         self.parents = get_smpl_parents() # 24/22 
 
@@ -263,8 +266,8 @@ class CanoObjectTrajDataset(Dataset):
         for p in self.female_bm.parameters():
             p.requires_grad = False 
 
-        self.male_bm = self.male_bm.cuda()
-        self.female_bm = self.female_bm.cuda()
+        self.male_bm = self.male_bm.to(self.device)
+        self.female_bm = self.female_bm.to(self.device)
         
         self.bm_dict = {'male' : self.male_bm, 'female' : self.female_bm}
 
@@ -402,9 +405,9 @@ class CanoObjectTrajDataset(Dataset):
         else:
             obj_mesh_verts, obj_mesh_faces = self.load_object_geometry(object_name, obj_scale, \
                                         obj_trans, obj_rot)
-            com_pos = obj_mesh_verts[0].mean(dim=0)[None] # 1 X 3 
-            obj_trans_to_com_pos = obj_trans[0:1] - com_pos.detach().cpu().numpy() # 1 X 3  
-            tmp_verts = obj_mesh_verts[0] - com_pos # Nv X 3
+            com_pos = obj_mesh_verts[0].mean(dim=0)[None] # 1 X 3  obj_mesh_verts是一个已经经过变换之后的物体顶点的坐标，这里取了第0帧
+            obj_trans_to_com_pos = obj_trans[0:1] - com_pos.detach().cpu().numpy() # 1 X 3  按理说好像应该是0，但是它不是，说明trans和物体几何中心不一致
+            tmp_verts = obj_mesh_verts[0] - com_pos # Nv X 3    # 这个其实就是把物体的几何中心变到了原点
             obj_rot = torch.from_numpy(obj_rot) 
             tmp_verts = tmp_verts.to(obj_rot.device)
             
@@ -547,10 +550,11 @@ class CanoObjectTrajDataset(Dataset):
                         seq_obj_trans, seq_obj_rot) # T X Nv X 3, tensor
             seq_obj_com_pos = seq_obj_verts.mean(dim=1) # T X 3 
 
-            obj_trans = seq_obj_com_pos.clone().detach().cpu().numpy() 
+            obj_trans = seq_obj_com_pos.clone().detach().cpu().numpy() ## 把物体几何中心点的路径变成了obj_trans, T x 3
 
             rest_pose_rot_mat_rep = torch.from_numpy(rest_pose_rot_mat).float()[None, :, :] # 1 X 3 X 3 
             obj_rot = torch.from_numpy(self.data_dict[index]['obj_rot']) # T X 3 X 3 
+            ## 这一步其实是把一整个seq的obj_rot按照第一帧的逆来旋转的，但是并不意味着对齐了坐标系，因为rest_pose_rot_mat_rep是一个只针对某个seq的rest_pose的旋转矩阵
             obj_rot = torch.matmul(obj_rot, rest_pose_rot_mat_rep.repeat(obj_rot.shape[0], 1, 1).transpose(1, 2)) # T X 3 X 3  
             obj_rot = obj_rot.detach().cpu().numpy() 
 
@@ -566,7 +570,7 @@ class CanoObjectTrajDataset(Dataset):
                 self.window_data_dict[s_idx] = {}
                 
                 joint_aa_rep = torch.cat((torch.from_numpy(seq_root_orient[start_t_idx:end_t_idx+1]).float()[:, None, :], \
-                    torch.from_numpy(seq_pose_body[start_t_idx:end_t_idx+1]).float()), dim=1) # T X J X 3 
+                    torch.from_numpy(seq_pose_body[start_t_idx:end_t_idx+1]).float()), dim=1) # T X J X 3 , T=window_size
                 X = torch.from_numpy(rest_human_offsets).float()[None].repeat(joint_aa_rep.shape[0], 1, 1).detach().cpu().numpy() # T X J X 3 
                 X[:, 0, :] = seq_root_trans[start_t_idx:end_t_idx+1] 
                 local_rot_mat = transforms.axis_angle_to_matrix(joint_aa_rep) # T X J X 3 X 3 
@@ -734,12 +738,12 @@ class CanoObjectTrajDataset(Dataset):
         random_t_idx = 0 
         end_t_idx = seq_root_trans.shape[0] - 1
 
-        window_root_trans = torch.from_numpy(seq_root_trans[random_t_idx:end_t_idx+1]).cuda()
-        window_root_orient = torch.from_numpy(seq_root_orient[random_t_idx:end_t_idx+1]).float().cuda()
-        window_pose_body  = torch.from_numpy(seq_pose_body[random_t_idx:end_t_idx+1]).float().cuda()
+        window_root_trans = torch.from_numpy(seq_root_trans[random_t_idx:end_t_idx+1]).to(self.device)
+        window_root_orient = torch.from_numpy(seq_root_orient[random_t_idx:end_t_idx+1]).float().to(self.device)
+        window_pose_body  = torch.from_numpy(seq_pose_body[random_t_idx:end_t_idx+1]).float().to(self.device)
 
-        window_obj_rot_mat = torch.from_numpy(obj_rot[random_t_idx:end_t_idx+1]).float().cuda() # T X 3 X 3 
-        window_obj_trans = torch.from_numpy(obj_trans[random_t_idx:end_t_idx+1]).float().cuda() # T X 3
+        window_obj_rot_mat = torch.from_numpy(obj_rot[random_t_idx:end_t_idx+1]).float().to(self.device) # T X 3 X 3 
+        window_obj_trans = torch.from_numpy(obj_trans[random_t_idx:end_t_idx+1]).float().to(self.device) # T X 3
 
         window_center_verts = center_verts[random_t_idx:end_t_idx+1].to(window_obj_trans.device)
 
@@ -761,8 +765,8 @@ class CanoObjectTrajDataset(Dataset):
 
         curr_seq_pose_aa = torch.cat((window_root_orient[:, None, :], window_pose_body), dim=1) # T' X 22 X 3/T' X 24 X 3 
         rest_human_offsets = torch.from_numpy(rest_human_offsets).float()[None] 
-        curr_seq_local_jpos = rest_human_offsets.repeat(curr_seq_pose_aa.shape[0], 1, 1).cuda() # T' X 22 X 3/T' X 24 X 3  
-        curr_seq_local_jpos[:, 0, :] = window_root_trans - torch.from_numpy(trans2joint).cuda()[None] # T' X 22/24 X 3 
+        curr_seq_local_jpos = rest_human_offsets.repeat(curr_seq_pose_aa.shape[0], 1, 1).to(self.device) # T' X 22 X 3/T' X 24 X 3  
+        curr_seq_local_jpos[:, 0, :] = window_root_trans - torch.from_numpy(trans2joint).to(self.device)[None] # T' X 22/24 X 3 
 
         local_joint_rot_mat = transforms.axis_angle_to_matrix(curr_seq_pose_aa)
         _, human_jnts = quat_fk_torch(local_joint_rot_mat, curr_seq_local_jpos)
@@ -854,7 +858,7 @@ class CanoObjectTrajDataset(Dataset):
         
         window_s_idx = self.window_data_dict[index]['start_t_idx']
         window_e_idx = self.window_data_dict[index]['end_t_idx']
-        contact_npy_path = os.path.join(self.contact_npy_folder, seq_name+".npy")
+        contact_npy_path = os.path.join(self.contact_npy_folder, seq_name+".npy")   # 这个contact看来也是直接给的gt
         contact_npy_data = np.load(contact_npy_path) # T X 4 (lhand, rhand, lfoot, rfoot)
         contact_labels = contact_npy_data[window_s_idx:window_e_idx+1] # W 
         contact_labels = torch.from_numpy(contact_labels).float() 
@@ -874,7 +878,7 @@ class CanoObjectTrajDataset(Dataset):
 
         obj_bps_data = np.load(obj_bps_npy_path) # T X N X 3 
 
-        if self.use_random_frame_bps:
+        if self.use_random_frame_bps:   # 也就是说预处理计算的是整一段的bps，然后这里是随机选取其中一帧的
             random_sampled_t_idx = random.sample(list(range(obj_bps_data.shape[0])), 1)[0]
             obj_bps_data = obj_bps_data[random_sampled_t_idx:random_sampled_t_idx+1] # 1 X N X 3  
 
@@ -888,13 +892,13 @@ class CanoObjectTrajDataset(Dataset):
         window_obj_rot_mat = torch.from_numpy(self.window_data_dict[index]['obj_rot_mat']).float()
 
         # Prepare relative rotation
-        if self.use_random_frame_bps: 
+        if self.use_random_frame_bps:   # 因为我选择的是随机一帧的obj_bps，所以这里也要随机选取一帧的obj_rot_mat，这两个得对应上
             reference_obj_rot_mat = window_obj_rot_mat[random_sampled_t_idx:random_sampled_t_idx+1]
             window_rel_obj_rot_mat = self.prep_rel_obj_rot_mat_w_reference_mat(window_obj_rot_mat, \
                             window_obj_rot_mat[random_sampled_t_idx:random_sampled_t_idx+1])
 
         num_joints = 24         
-        normalized_jpos = self.normalize_jpos_min_max(data_input[:, :num_joints*3].reshape(-1, num_joints, 3)) # T X 22 X 3 
+        normalized_jpos = self.normalize_jpos_min_max(data_input[:, :num_joints*3].reshape(-1, num_joints, 3)) # T X 24 X 3 
        
         global_joint_rot = data_input[:, 2*num_joints*3:] # T X (22*6)
 
@@ -902,9 +906,9 @@ class CanoObjectTrajDataset(Dataset):
         ori_data_input = torch.cat((data_input[:, :num_joints*3], global_joint_rot), dim=1)
 
         # Prepare object keypoints for each frame. 
-        if self.use_object_keypoints:
+        if self.use_object_keypoints:   # true in infer
             # Load rest pose BPS and compute nn points on the object. 
-            rest_obj_bps_npy_path = os.path.join(self.rest_object_geo_folder, object_name+".npy")
+            rest_obj_bps_npy_path = os.path.join(self.rest_object_geo_folder, object_name+".npy")   # 这个里面保存的就是rest pose的偏移量
             rest_obj_bps_data = np.load(rest_obj_bps_npy_path) # 1 X 1024 X 3 
             nn_pts_on_mesh = self.obj_bps + torch.from_numpy(rest_obj_bps_data).float().to(self.obj_bps.device) # 1 X 1024 X 3 
             nn_pts_on_mesh = nn_pts_on_mesh.squeeze(0) # 1024 X 3 
@@ -916,7 +920,7 @@ class CanoObjectTrajDataset(Dataset):
             rest_pose_obj_nn_pts = sampled_nn_pts_on_mesh.clone() 
 
             # Compute point positions for each frame 
-            sampled_nn_pts_on_mesh = sampled_nn_pts_on_mesh[None].repeat(window_obj_rot_mat.shape[0], 1, 1)
+            sampled_nn_pts_on_mesh = sampled_nn_pts_on_mesh[None].repeat(window_obj_rot_mat.shape[0], 1, 1) # [K, 3]->[T, K, 3]
             transformed_obj_nn_pts = window_obj_rot_mat.bmm(sampled_nn_pts_on_mesh.transpose(1, 2)) + \
                             obj_com_pos[:, :, None]
             transformed_obj_nn_pts= transformed_obj_nn_pts.transpose(1, 2) # T X K X 3 
